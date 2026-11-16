@@ -23866,6 +23866,64 @@ async function loadEmoji(code) {
   if (!b64) throw new Error(`name ${name} not found in map`);
   return b64;
 }
+var FAMILY_BY_CODE = {
+  "zh-CN": "Noto Sans SC",
+  "zh-TW": "Noto Sans SC",
+  "zh-HK": "Noto Sans SC",
+  "ja-JP": "Noto Sans SC",
+  unknown: "Noto Sans SC",
+  "ko-KR": "Noto Sans KR"
+};
+var WEIGHTS = [400, 700];
+function createCjkFontLoader(fetchImpl = fetch) {
+  const cache = /* @__PURE__ */ new Map();
+  let subsetSeq = 0;
+  async function load2(family, segment) {
+    const subsetName = `${family} ${++subsetSeq}`;
+    try {
+      const cssUrl = `https://fonts.googleapis.com/css2?family=${family.replaceAll(" ", "+")}:wght@${WEIGHTS.join(";")}&text=${encodeURIComponent(segment)}`;
+      const cssRes = await fetchImpl(cssUrl);
+      if (!cssRes.ok) throw new Error(`css ${cssRes.status}`);
+      const css = await cssRes.text();
+      const fonts = [];
+      const blockRe = /@font-face\s*{([^}]*)}/g;
+      for (const [, block] of css.matchAll(blockRe)) {
+        const weight = Number(block?.match(/font-weight:\s*(\d+)/)?.[1]);
+        const url = block?.match(/src:\s*url\((.+?)\)\s*format\('(?:truetype|opentype)'\)/)?.[1];
+        if (!url || !WEIGHTS.includes(weight)) continue;
+        const fontRes = await fetchImpl(url);
+        if (!fontRes.ok) throw new Error(`font ${fontRes.status}`);
+        fonts.push({
+          name: subsetName,
+          data: await fontRes.arrayBuffer(),
+          weight,
+          style: "normal"
+        });
+      }
+      return fonts.length > 0 ? fonts : null;
+    } catch (err2) {
+      console.warn(
+        styleText(
+          "yellow",
+          `Warning: Failed to load fallback font ${family} for "${segment}": ${String(err2)}`
+        )
+      );
+      return null;
+    }
+  }
+  return async (languageCode, segment) => {
+    const family = languageCode.split("|").map((code) => FAMILY_BY_CODE[code]).find((f3) => Boolean(f3));
+    if (!family) return null;
+    const key = `${family}\0${segment}`;
+    let pending = cache.get(key);
+    if (!pending) {
+      pending = load2(family, segment);
+      cache.set(key, pending);
+    }
+    return await pending;
+  };
+}
+var loadCjkFont = createCjkFontLoader();
 
 // src/emitter.tsx
 var QUARTZ = "quartz";
@@ -24202,6 +24260,25 @@ var defaultOptions = {
   defaultDescription: "No description provided",
   readingTimeText: (minutes) => `${minutes} min read`
 };
+async function loadAdditionalAsset(languageCode, segment) {
+  if (languageCode === "emoji") {
+    return await loadEmoji(getIconCode(segment));
+  }
+  const cjkFonts = await loadCjkFont(languageCode, segment);
+  if (cjkFonts) return cjkFonts;
+  return languageCode;
+}
+async function renderSocialSvg(component, opts) {
+  return await El(component, {
+    width: opts.width,
+    height: opts.height,
+    // satori 按 fonts 数组引用缓存字体加载器，loadAdditionalAsset 补进来的字体会挂在该缓存上；
+    // CJK 回退字体是「只含本页字符」的子集，若多页共用同一数组，后续页面的新字会命中旧子集
+    // 而渲染成豆腐块。每次渲染传浅拷贝，隔离各页的回退字体。
+    fonts: [...opts.fonts ?? []],
+    loadAdditionalAsset
+  });
+}
 async function generateSocialImage({ cfg, description, fonts, title, fileData }, userOpts) {
   const { width, height } = userOpts;
   const iconPath = joinSegments(QUARTZ, "static", "icon.png");
@@ -24221,17 +24298,7 @@ async function generateSocialImage({ cfg, description, fonts, title, fileData },
     fileData,
     iconBase64
   });
-  const svg = await El(imageComponent, {
-    width,
-    height,
-    fonts,
-    loadAdditionalAsset: async (languageCode, segment) => {
-      if (languageCode === "emoji") {
-        return await loadEmoji(getIconCode(segment));
-      }
-      return languageCode;
-    }
-  });
+  const svg = await renderSocialSvg(imageComponent, { width, height, fonts });
   return sharp(Buffer.from(svg)).webp({ quality: 40 });
 }
 async function processOgImage(ctx, fileData, fonts, fullOptions) {

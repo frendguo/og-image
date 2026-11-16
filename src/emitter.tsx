@@ -21,6 +21,7 @@ import { type ThemeKey } from "@quartz-community/types";
 import { getIconCode } from "@quartz-community/utils/emoji";
 import { type FontSpecification, type Theme, getFontSpecificationName } from "./theme.js";
 import { loadEmoji } from "./emoji.js";
+import { loadCjkFont } from "./cjk-font.js";
 
 const QUARTZ = "quartz";
 
@@ -419,6 +420,38 @@ const defaultOptions: SocialImageOptions = {
   readingTimeText: (minutes) => `${minutes} min read`,
 };
 
+/**
+ * satori 遇到已加载字体缺失的字形时回调：按语言码补充 emoji / 字体。
+ */
+export async function loadAdditionalAsset(
+  languageCode: string,
+  segment: string,
+): Promise<string | NonNullable<SatoriOptions["fonts"]>> {
+  if (languageCode === "emoji") {
+    return await loadEmoji(getIconCode(segment));
+  }
+
+  const cjkFonts = await loadCjkFont(languageCode, segment);
+  if (cjkFonts) return cjkFonts;
+
+  return languageCode;
+}
+
+export async function renderSocialSvg(
+  component: JSX.Element,
+  opts: { width: number; height: number; fonts: SatoriOptions["fonts"] },
+): Promise<string> {
+  return await satori(component as Parameters<typeof satori>[0], {
+    width: opts.width,
+    height: opts.height,
+    // satori 按 fonts 数组引用缓存字体加载器，loadAdditionalAsset 补进来的字体会挂在该缓存上；
+    // CJK 回退字体是「只含本页字符」的子集，若多页共用同一数组，后续页面的新字会命中旧子集
+    // 而渲染成豆腐块。每次渲染传浅拷贝，隔离各页的回退字体。
+    fonts: [...(opts.fonts ?? [])],
+    loadAdditionalAsset,
+  });
+}
+
 async function generateSocialImage(
   { cfg, description, fonts, title, fileData }: ImageOptions,
   userOpts: SocialImageOptions,
@@ -444,18 +477,7 @@ async function generateSocialImage(
     iconBase64,
   });
 
-  const svg = await satori(imageComponent as Parameters<typeof satori>[0], {
-    width,
-    height,
-    fonts,
-    loadAdditionalAsset: async (languageCode: string, segment: string) => {
-      if (languageCode === "emoji") {
-        return await loadEmoji(getIconCode(segment));
-      }
-
-      return languageCode;
-    },
-  });
+  const svg = await renderSocialSvg(imageComponent, { width, height, fonts });
 
   return sharp(Buffer.from(svg)).webp({ quality: 40 });
 }
